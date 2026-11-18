@@ -1,0 +1,72 @@
+x-app: &app
+  build:
+    context: .
+    target: app
+  environment:
+    DATABASE_URL: postgresql+psycopg://lidar:local-only@db:5432/lidar
+    AWS_ACCESS_KEY_ID: local-only
+    AWS_SECRET_ACCESS_KEY: local-only
+    AWS_DEFAULT_REGION: us-east-1
+    MOTO_URL: http://moto:5000
+    UPLOAD_URL_BASE: http://127.0.0.1:5000
+
+services:
+  db:
+    image: postgis/postgis:17-3.5
+    platform: linux/amd64
+    environment:
+      POSTGRES_DB: lidar
+      POSTGRES_USER: lidar
+      POSTGRES_PASSWORD: local-only
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lidar -d lidar -h 127.0.0.1"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  moto:
+    build:
+      context: .
+      target: emulator
+    ports:
+      - "127.0.0.1:5000:5000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5000/', timeout=2).close()"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  init:
+    <<: *app
+    command: ["sh", "-c", "alembic upgrade head && python -m pointcloud.bootstrap"]
+    depends_on:
+      db:
+        condition: service_healthy
+      moto:
+        condition: service_healthy
+
+  api:
+    <<: *app
+    command: ["uvicorn", "pointcloud.api:app", "--host", "0.0.0.0", "--port", "8000"]
+    ports:
+      - "127.0.0.1:8000:8000"
+    depends_on:
+      init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2).close()"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  worker:
+    <<: *app
+    command: ["python", "-m", "pointcloud.worker"]
+    depends_on:
+      init:
+        condition: service_completed_successfully
+
+volumes:
+  db-data:
